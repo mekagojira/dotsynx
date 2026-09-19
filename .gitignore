@@ -1,0 +1,21 @@
+# Binaries
+bin/
+dotsynx
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Go build & module cache
+.cache/
+vendor/
+
+# Node & Web
+web/node_modules/
+web/dist/
+.npm/
+
+# OS / Editor
+.DS_Store
+.vscode/
+.idea/
