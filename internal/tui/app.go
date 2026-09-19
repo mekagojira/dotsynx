@@ -78,6 +78,7 @@ type AppModel struct {
 	LastSync        *core.SyncResult
 	StatusMessage   string
 	IsSyncing       bool
+	PendingReset    bool
 	Err             error
 }
 
@@ -231,6 +232,12 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+		// Any key other than the "r" confirmation cancels a pending reset
+		if m.PendingReset && msg.String() != "r" {
+			m.PendingReset = false
+			m.StatusMessage = "Reset aborted."
+		}
+
 		switch msg.String() {
 		case "ctrl+c", "q":
 			return m, tea.Quit
@@ -270,13 +277,29 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 
-		// Force reset to remote
+		// Force reset to remote (requires confirmation via a second [r] press)
 		case "r":
 			if !m.IsSyncing {
 				if m.Config.RepoURL == "" {
 					m.StatusMessage = "⚠️  Cannot reset: No remote repository URL is configured."
 					return m, nil
 				}
+
+				branch := m.Config.Branch
+				if branch == "" {
+					branch = "main"
+				}
+
+				if !m.PendingReset {
+					m.PendingReset = true
+					m.StatusMessage = fmt.Sprintf(
+						"⚠️  Hard reset to origin/%s discards local commits and untracked files in the storage repo. Press [r] again to confirm, any other key to cancel.",
+						branch,
+					)
+					return m, nil
+				}
+
+				m.PendingReset = false
 				m.IsSyncing = true
 				m.StatusMessage = "⏳ Resetting local storage to remote origin..."
 				return m, func() tea.Msg {
@@ -878,7 +901,7 @@ func (m AppModel) renderSettings() string {
 	lines = append(lines, fmt.Sprintf("Theme:              %s (system, dark, light)", m.Config.Theme))
 	lines = append(lines, fmt.Sprintf("Config File:        %s", config.DefaultConfigPath()))
 	lines = append(lines, fmt.Sprintf("Backup Directory:   %s", m.Config.BackupDir))
-	lines = append(lines, "\n💡 Tip: Press [r] or run 'dotsynx reset-remote' (or 'dotsynx sync --reset-hard') to force reset local dotfiles to match remote origin.")
+	lines = append(lines, "\n💡 Tip: Press [r] twice or run 'dotsynx sync reset' to force reset local dotfiles to match remote origin.")
 	lines = append(lines, "To edit settings, open the web UI (`dotsynx ui`) or edit the YAML config file directly.")
 
 	return m.Styles.Card.Width(m.Width - 4).Render(strings.Join(lines, "\n"))
@@ -887,7 +910,7 @@ func (m AppModel) renderSettings() string {
 func (m AppModel) renderFooter() string {
 	keys := []string{
 		"[s] Sync Now",
-		"[r] Reset to Remote",
+		"[r][r] Reset to Remote",
 		"[1-7/Tab] Switch Tabs",
 		"[u] Open Web UI",
 		"[q] Quit",

@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -296,28 +298,7 @@ func newSyncCommand() *cobra.Command {
 			}
 
 			if resetHard {
-				fmt.Println("🔄 Performing hard reset to remote repository...")
-				if running, _ := daemon.CheckRunning(); running {
-					res, err := daemon.RequestResetViaHTTP(cfg.WebPort)
-					if err != nil {
-						fmt.Printf("Daemon reset request failed (%v); falling back to direct reset...\n", err)
-					} else {
-						printSyncResult(res)
-						return nil
-					}
-				}
-
-				eng, err := core.NewEngine(cfg)
-				if err != nil {
-					return err
-				}
-
-				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-				defer cancel()
-
-				res, err := eng.ResetToRemote(ctx)
-				printSyncResult(res)
-				return err
+				return runResetToRemote(cfg)
 			}
 
 			fmt.Println("⚡ Synchronizing dotfiles...")
@@ -350,6 +331,44 @@ func newSyncCommand() *cobra.Command {
 
 	cmd.Flags().BoolVarP(&resetHard, "reset-hard", "r", false, "Discard local divergence and force reset to remote origin/<branch>")
 	cmd.Flags().BoolVarP(&resetHard, "force", "f", false, "Alias for --reset-hard")
+	cmd.AddCommand(newSyncResetCommand())
+	return cmd
+}
+
+// dotsynx sync reset
+func newSyncResetCommand() *cobra.Command {
+	var yes bool
+
+	cmd := &cobra.Command{
+		Use:     "reset",
+		Aliases: []string{"reset-hard"},
+		Short:   "Discard local divergence and force reset to remote origin/<branch>",
+		Long:    "Fetches origin, hard resets the local repo to origin/<branch>, cleans untracked items, reloads the manifest, and updates $HOME symlinks.",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.Load(cfgPath)
+			if err != nil {
+				return err
+			}
+
+			if !yes {
+				branch := cfg.Branch
+				if branch == "" {
+					branch = "main"
+				}
+				if err := confirmReset(branch); err != nil {
+					if errors.Is(err, errAbortedByUser) {
+						fmt.Println("Aborted.")
+						return nil
+					}
+					return err
+				}
+			}
+
+			return runResetToRemote(cfg)
+		},
+	}
+
+	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "Skip the confirmation prompt")
 	return cmd
 }
 
@@ -364,33 +383,69 @@ func newResetRemoteCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-
-			if cfg.RepoURL == "" {
-				return fmt.Errorf("no remote repository URL is configured. Run 'dotsynx config --repo <url>' first")
-			}
-
-			fmt.Println("🔄 Resetting local dotfiles repository to remote...")
-			if running, _ := daemon.CheckRunning(); running {
-				res, err := daemon.RequestResetViaHTTP(cfg.WebPort)
-				if err == nil {
-					printSyncResult(res)
-					return nil
-				}
-			}
-
-			eng, err := core.NewEngine(cfg)
-			if err != nil {
-				return err
-			}
-
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-			defer cancel()
-
-			res, err := eng.ResetToRemote(ctx)
-			printSyncResult(res)
-			return err
+			return runResetToRemote(cfg)
 		},
 	}
+}
+
+// confirmReset asks for interactive confirmation before a destructive reset.
+// Without a terminal there is nobody to answer, so it refuses rather than
+// assuming consent: non-interactive callers must pass --yes explicitly.
+func confirmReset(branch string) error {
+	info, err := os.Stdin.Stat()
+	if err != nil || (info.Mode()&os.ModeCharDevice) == 0 {
+		return fmt.Errorf("refusing to reset without confirmation: stdin is not a terminal, pass --yes to proceed")
+	}
+
+	fmt.Printf("This will hard reset your local dotfiles repository to origin/%s.\n", branch)
+	fmt.Println("Local commits and untracked files in the storage repo will be discarded.")
+	fmt.Println("Existing files in $HOME are backed up before being replaced by symlinks.")
+	fmt.Print("Continue? [y/N]: ")
+
+	answer, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	if err != nil {
+		return fmt.Errorf("could not read confirmation: %w", err)
+	}
+
+	switch strings.ToLower(strings.TrimSpace(answer)) {
+	case "y", "yes":
+		return nil
+	default:
+		return errAbortedByUser
+	}
+}
+
+// errAbortedByUser signals a clean, user-initiated cancellation
+var errAbortedByUser = errors.New("aborted by user")
+
+// runResetToRemote performs the hard reset, preferring a running daemon so state stays unified
+func runResetToRemote(cfg *config.Config) error {
+	if cfg.RepoURL == "" {
+		return fmt.Errorf("no remote repository URL is configured. Run 'dotsynx config --repo <url>' first")
+	}
+
+	fmt.Println("🔄 Resetting local dotfiles repository to remote...")
+	if running, _ := daemon.CheckRunning(); running {
+		res, err := daemon.RequestResetViaHTTP(cfg.WebPort)
+		if err != nil {
+			fmt.Printf("Daemon reset request failed (%v); falling back to direct reset...\n", err)
+		} else {
+			printSyncResult(res)
+			return nil
+		}
+	}
+
+	eng, err := core.NewEngine(cfg)
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	res, err := eng.ResetToRemote(ctx)
+	printSyncResult(res)
+	return err
 }
 
 func printSyncResult(res *core.SyncResult) {
