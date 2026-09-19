@@ -25,6 +25,39 @@ A modern, fast, and automated dotfile synchronization agent for **macOS** and **
 
 ---
 
+## 📦 Cross-Platform & Universal Binaries
+
+`dotsynx` compiles into zero-dependency, self-contained binaries:
+
+- **macOS Universal Binary:** Combines Intel (`amd64`) and Apple Silicon (`arm64`) using `lipo` so a single executable runs natively on **all Macs**.
+- **Linux Static Binaries:** Statically linked ELF binaries for `linux/amd64` (x86_64) and `linux/arm64` (aarch64).
+
+### Automated GitHub Release
+
+A GitHub Actions workflow (`.github/workflows/release.yml`) is included. Whenever you push a version tag:
+
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+GitHub Actions will automatically build all platforms, compute SHA256 checksums, and publish a **GitHub Release** with downloadable assets.
+
+### Build Release Packages Locally
+
+```bash
+make dist
+```
+
+Generates release tarballs and `checksums.txt` in `bin/archives/`:
+
+- `dotsynx-darwin-universal.tar.gz`
+- `dotsynx-linux-amd64.tar.gz`
+- `dotsynx-linux-arm64.tar.gz`
+- `checksums.txt`
+
+---
+
 ## 🚀 Quick Start
 
 ### 1. Build

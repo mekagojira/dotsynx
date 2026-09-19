@@ -1,0 +1,80 @@
+name: Release dotsynx
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache: true
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: 'web/package.json'
+
+      - name: Build React Webview
+        run: |
+          cd web
+          npm ci
+          npm run build
+
+      - name: Extract Tag Version
+        id: version
+        run: |
+          TAG_NAME="${GITHUB_REF#refs/tags/}"
+          echo "VERSION=${TAG_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Cross-compile Binaries
+        run: |
+          VERSION="${{ steps.version.outputs.VERSION }}"
+          mkdir -p dist/bin dist/archives
+
+          # 1. macOS ARM64
+          CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -ldflags="-s -w -X main.version=${VERSION}" -o dist/bin/dotsynx-darwin-arm64 ./cmd/dotsynx
+          # 2. macOS AMD64
+          CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -ldflags="-s -w -X main.version=${VERSION}" -o dist/bin/dotsynx-darwin-amd64 ./cmd/dotsynx
+          # 3. macOS Universal (ARM64 + AMD64 combined)
+          lipo -create -output dist/bin/dotsynx dist/bin/dotsynx-darwin-amd64 dist/bin/dotsynx-darwin-arm64
+          codesign -s - -f dist/bin/dotsynx
+          tar -czvf "dist/archives/dotsynx_${VERSION}_darwin_universal.tar.gz" -C dist/bin dotsynx README.md 2>/dev/null || tar -czvf "dist/archives/dotsynx_${VERSION}_darwin_universal.tar.gz" -C dist/bin dotsynx
+
+          # 4. Linux AMD64 (x86_64)
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w -X main.version=${VERSION}" -o dist/bin/dotsynx ./cmd/dotsynx
+          tar -czvf "dist/archives/dotsynx_${VERSION}_linux_amd64.tar.gz" -C dist/bin dotsynx
+
+          # 5. Linux ARM64 (aarch64)
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w -X main.version=${VERSION}" -o dist/bin/dotsynx ./cmd/dotsynx
+          tar -czvf "dist/archives/dotsynx_${VERSION}_linux_arm64.tar.gz" -C dist/bin dotsynx
+
+      - name: Generate Checksums
+        run: |
+          cd dist/archives
+          shasum -a 256 * > checksums.txt
+          cat checksums.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/archives/*
+          generate_release_notes: true
+          draft: false
+          prerelease: false
