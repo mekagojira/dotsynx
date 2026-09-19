@@ -27,13 +27,24 @@ export async function triggerSync(): Promise<SyncResult> {
   return res.json();
 }
 
+export async function resetHardToRemote(): Promise<SyncResult> {
+  const res = await fetch(`${API_BASE}/reset-remote`, { method: "POST" });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || `Reset failed: ${res.statusText}`);
+  }
+  return res.json();
+}
+
 export async function fetchConfig(): Promise<Config> {
   const res = await fetch(`${API_BASE}/config`);
   if (!res.ok) throw new Error("Failed to get config");
   return res.json();
 }
 
-export async function updateConfig(cfg: Partial<Config>): Promise<Config> {
+export async function updateConfig(
+  cfg: Partial<Config> & { reset_to_remote?: boolean },
+): Promise<Config> {
   const res = await fetch(`${API_BASE}/config`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },

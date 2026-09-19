@@ -270,6 +270,23 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 
+		// Force reset to remote
+		case "r":
+			if !m.IsSyncing {
+				if m.Config.RepoURL == "" {
+					m.StatusMessage = "⚠️  Cannot reset: No remote repository URL is configured."
+					return m, nil
+				}
+				m.IsSyncing = true
+				m.StatusMessage = "⏳ Resetting local storage to remote origin..."
+				return m, func() tea.Msg {
+					ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+					defer cancel()
+					res, err := m.Engine.ResetToRemote(ctx)
+					return syncDoneMsg{Result: res, Err: err}
+				}
+			}
+
 		// Navigation
 		case "up", "k":
 			m.navigateUp()
@@ -861,7 +878,8 @@ func (m AppModel) renderSettings() string {
 	lines = append(lines, fmt.Sprintf("Theme:              %s (system, dark, light)", m.Config.Theme))
 	lines = append(lines, fmt.Sprintf("Config File:        %s", config.DefaultConfigPath()))
 	lines = append(lines, fmt.Sprintf("Backup Directory:   %s", m.Config.BackupDir))
-	lines = append(lines, "\nTo edit these settings, open the web UI (`dotsynx ui`) or edit the YAML config file directly.")
+	lines = append(lines, "\n💡 Tip: Press [r] or run 'dotsynx reset-remote' (or 'dotsynx sync --reset-hard') to force reset local dotfiles to match remote origin.")
+	lines = append(lines, "To edit settings, open the web UI (`dotsynx ui`) or edit the YAML config file directly.")
 
 	return m.Styles.Card.Width(m.Width - 4).Render(strings.Join(lines, "\n"))
 }
@@ -869,6 +887,7 @@ func (m AppModel) renderSettings() string {
 func (m AppModel) renderFooter() string {
 	keys := []string{
 		"[s] Sync Now",
+		"[r] Reset to Remote",
 		"[1-7/Tab] Switch Tabs",
 		"[u] Open Web UI",
 		"[q] Quit",

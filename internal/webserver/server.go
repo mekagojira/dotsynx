@@ -52,6 +52,7 @@ func (s *Server) Handler() http.Handler {
 	// API routes
 	mux.HandleFunc("/api/status", s.handleStatus)
 	mux.HandleFunc("/api/sync", s.handleSync)
+	mux.HandleFunc("/api/reset-remote", s.handleResetRemote)
 	mux.HandleFunc("/api/config", s.handleConfig)
 	mux.HandleFunc("/api/files", s.handleFiles)
 	mux.HandleFunc("/api/files/track", s.handleTrack)
@@ -69,6 +70,7 @@ func (s *Server) Handler() http.Handler {
 	// Backward-compatible daemon endpoints
 	mux.HandleFunc("/daemon/status", s.handleStatus)
 	mux.HandleFunc("/daemon/sync", s.handleSync)
+	mux.HandleFunc("/daemon/reset", s.handleResetRemote)
 
 	// Static assets handler
 	var fileServer http.Handler
@@ -203,23 +205,47 @@ func (s *Server) handleSync(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, res)
 }
 
+func (s *Server) handleResetRemote(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
+	defer cancel()
+
+	res, err := s.Engine.ResetToRemote(ctx)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{
+			"error":  err.Error(),
+			"result": res,
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, res)
+}
+
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		writeJSON(w, http.StatusOK, s.Config)
 	case http.MethodPost:
-		var updated config.Config
-		if err := json.NewDecoder(r.Body).Decode(&updated); err != nil {
+		var req struct {
+			config.Config `json:",inline"`
+			ResetToRemote bool `json:"reset_to_remote"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 
-		s.Config.RepoURL = updated.RepoURL
-		s.Config.Branch = updated.Branch
-		s.Config.SyncMode = updated.SyncMode
-		s.Config.Interval = updated.Interval
-		s.Config.ConflictStrategy = updated.ConflictStrategy
-		s.Config.Theme = updated.Theme
+		s.Config.RepoURL = strings.TrimSpace(req.RepoURL)
+		s.Config.Branch = strings.TrimSpace(req.Branch)
+		s.Config.SyncMode = req.SyncMode
+		s.Config.Interval = req.Interval
+		s.Config.ConflictStrategy = req.ConflictStrategy
+		s.Config.Theme = req.Theme
 
 		if err := s.Config.Save(""); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -229,6 +255,13 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		// Update git remote if changed
 		if s.Config.RepoURL != "" {
 			_ = s.Engine.Git.SetRemote(s.Config.RepoURL)
+			ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+			if req.ResetToRemote {
+				_, _ = s.Engine.ResetToRemote(ctx)
+			} else {
+				_ = s.Engine.EnsureRepoReady(ctx)
+			}
+			cancel()
 		}
 
 		writeJSON(w, http.StatusOK, s.Config)

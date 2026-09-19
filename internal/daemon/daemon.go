@@ -170,6 +170,7 @@ func (d *Daemon) Start(ctx context.Context) error {
 		mux := http.NewServeMux()
 		mux.HandleFunc("/daemon/status", d.handleStatus)
 		mux.HandleFunc("/daemon/sync", d.handleSync)
+		mux.HandleFunc("/daemon/reset", d.handleReset)
 		httpHandler = mux
 	}
 
@@ -233,6 +234,23 @@ func (d *Daemon) TriggerSync() (*core.SyncResult, error) {
 	defer cancel()
 
 	res, err := d.Engine.Sync(ctx)
+	d.LastSync = res
+	return res, err
+}
+
+// TriggerReset executes a hard reset to remote safely
+func (d *Daemon) TriggerReset() (*core.SyncResult, error) {
+	if d.SyncActive {
+		return nil, errors.New("a sync or reset operation is already in progress")
+	}
+
+	d.SyncActive = true
+	defer func() { d.SyncActive = false }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	res, err := d.Engine.ResetToRemote(ctx)
 	d.LastSync = res
 	return res, err
 }
@@ -312,6 +330,26 @@ func (d *Daemon) handleSync(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(res)
 }
 
+func (d *Daemon) handleReset(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	res, err := d.TriggerReset()
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"error":   err.Error(),
+			"details": res,
+		})
+		return
+	}
+
+	_ = json.NewEncoder(w).Encode(res)
+}
+
 // RequestSyncViaHTTP asks a running daemon over HTTP to trigger a sync
 func RequestSyncViaHTTP(port int) (*core.SyncResult, error) {
 	if port == 0 {
@@ -319,6 +357,27 @@ func RequestSyncViaHTTP(port int) (*core.SyncResult, error) {
 	}
 	client := &http.Client{Timeout: 60 * time.Second}
 	resp, err := client.Post(fmt.Sprintf("http://127.0.0.1:%d/daemon/sync", port), "application/json", nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	var res core.SyncResult
+	body, _ := io.ReadAll(resp.Body)
+	if err := json.Unmarshal(body, &res); err != nil {
+		return nil, fmt.Errorf("failed to parse daemon response: %w", err)
+	}
+
+	return &res, nil
+}
+
+// RequestResetViaHTTP asks a running daemon over HTTP to trigger a hard reset to remote
+func RequestResetViaHTTP(port int) (*core.SyncResult, error) {
+	if port == 0 {
+		port = 18942
+	}
+	client := &http.Client{Timeout: 60 * time.Second}
+	resp, err := client.Post(fmt.Sprintf("http://127.0.0.1:%d/daemon/reset", port), "application/json", nil)
 	if err != nil {
 		return nil, err
 	}

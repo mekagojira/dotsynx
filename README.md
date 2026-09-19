@@ -92,6 +92,20 @@ Launch the embedded local web interface and automatically open your default brow
 # Show status of daemon, git, service, and tracked items
 dotsynx status
 
+# Synchronize dotfiles immediately
+dotsynx sync
+
+# Force hard reset of local storage & dotfiles to remote repository (ideal for new device setup)
+dotsynx reset-remote
+# or: dotsynx sync --reset-hard
+
+# Connect an existing GitHub repository on a new machine
+dotsynx clone git@github.com:username/dotfiles.git
+
+# View or update configuration from CLI
+dotsynx config
+dotsynx config --repo git@github.com:username/dotfiles.git --branch main
+
 # Start the background daemon (also serves Web UI at http://127.0.0.1:18942)
 dotsynx start
 
@@ -110,12 +124,6 @@ dotsynx logs -f                # Follow live log stream
 dotsynx logs -n 100            # Show last 100 lines
 dotsynx logs --since 30m       # Show logs from last 30 minutes
 dotsynx logs --clear           # Clear log file
-
-# Start the background daemon
-dotsynx start
-
-# Stop the background daemon
-dotsynx stop
 
 # Install as an OS boot service (launchd on macOS / systemd on Linux)
 dotsynx service install

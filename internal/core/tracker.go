@@ -223,6 +223,9 @@ func (t *Tracker) LoadRepoManifest() error {
 	manifestPath := filepath.Join(t.Config.StorageDir, "dotsynx.manifest.yaml")
 	data, err := os.ReadFile(manifestPath)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return t.AutoImportFromRepo()
+		}
 		return nil
 	}
 
@@ -231,20 +234,108 @@ func (t *Tracker) LoadRepoManifest() error {
 		return err
 	}
 
-	existingMap := make(map[string]bool)
-	for _, it := range t.Config.Tracked {
-		existingMap[it.Path] = true
+	existingMap := make(map[string]int)
+	for i, it := range t.Config.Tracked {
+		existingMap[it.Path] = i
 	}
 
 	changed := false
 	for _, rem := range remoteTracked {
-		if !existingMap[rem.Path] {
+		if idx, exists := existingMap[rem.Path]; exists {
+			if rem.Description != "" && t.Config.Tracked[idx].Description == "" {
+				t.Config.Tracked[idx].Description = rem.Description
+				changed = true
+			}
+		} else {
 			t.Config.Tracked = append(t.Config.Tracked, rem)
 			changed = true
 		}
 	}
 
 	if changed {
+		return t.Config.Save("")
+	}
+	return nil
+}
+
+// AutoImportFromRepo scans storage repo for dotfiles when dotsynx.manifest.yaml is absent
+func (t *Tracker) AutoImportFromRepo() error {
+	if _, err := os.Stat(t.Config.StorageDir); os.IsNotExist(err) {
+		return nil
+	}
+
+	entries, err := os.ReadDir(t.Config.StorageDir)
+	if err != nil {
+		return nil
+	}
+
+	ignoreList := map[string]bool{
+		".git":                  true,
+		".gitignore":            true,
+		"dotsynx.manifest.yaml": true,
+		".DS_Store":             true,
+		"Thumbs.db":             true,
+		"README.md":             true,
+		"readme.md":             true,
+		"LICENSE":               true,
+		"license":               true,
+		"Makefile":              true,
+		"install.sh":            true,
+		"bin":                   true,
+		"web":                   true,
+	}
+
+	existingMap := make(map[string]bool)
+	for _, it := range t.Config.Tracked {
+		existingMap[it.Path] = true
+	}
+
+	changed := false
+	for _, e := range entries {
+		name := e.Name()
+		if ignoreList[name] || strings.HasPrefix(name, "README") || strings.HasPrefix(name, "LICENSE") {
+			continue
+		}
+
+		if name == ".config" && e.IsDir() {
+			configEntries, cErr := os.ReadDir(filepath.Join(t.Config.StorageDir, ".config"))
+			if cErr == nil {
+				for _, ce := range configEntries {
+					if ignoreList[ce.Name()] {
+						continue
+					}
+					relPath := filepath.Join(".config", ce.Name())
+					if !existingMap[relPath] {
+						t.Config.Tracked = append(t.Config.Tracked, config.TrackedItem{
+							Path:        relPath,
+							RepoPath:    relPath,
+							IsDir:       ce.IsDir(),
+							Enabled:     true,
+							Description: fmt.Sprintf("%s configuration", ce.Name()),
+						})
+						existingMap[relPath] = true
+						changed = true
+					}
+				}
+			}
+			continue
+		}
+
+		if !existingMap[name] {
+			t.Config.Tracked = append(t.Config.Tracked, config.TrackedItem{
+				Path:        name,
+				RepoPath:    name,
+				IsDir:       e.IsDir(),
+				Enabled:     true,
+				Description: fmt.Sprintf("%s configuration", strings.TrimPrefix(name, ".")),
+			})
+			existingMap[name] = true
+			changed = true
+		}
+	}
+
+	if changed {
+		_ = t.WriteRepoManifest()
 		return t.Config.Save("")
 	}
 	return nil

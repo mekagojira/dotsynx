@@ -86,3 +86,45 @@ func TestTrackerAndBackup(t *testing.T) {
 		t.Errorf("expected StatusLinked, got %s", st.LinkStatus)
 	}
 }
+
+func TestAutoImportFromRepo(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "dotsynx-autoimport-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	storageDir := filepath.Join(tmpDir, "repo")
+	backupDir := filepath.Join(tmpDir, "backups")
+	homeDir := filepath.Join(tmpDir, "home")
+
+	// Config.Save("") resolves to DefaultConfigPath() under $HOME; redirect HOME
+	// so the code under test cannot overwrite the real user config.
+	t.Setenv("HOME", homeDir)
+
+	_ = os.MkdirAll(storageDir, 0755)
+	_ = os.MkdirAll(filepath.Join(storageDir, ".config", "nvim"), 0755)
+	_ = os.WriteFile(filepath.Join(storageDir, ".zshrc"), []byte("# zsh"), 0644)
+	_ = os.WriteFile(filepath.Join(storageDir, ".config", "nvim", "init.lua"), []byte("-- nvim"), 0644)
+
+	cfg := &config.Config{
+		StorageDir: storageDir,
+		BackupDir:  backupDir,
+		Tracked:    []config.TrackedItem{},
+	}
+
+	tracker := &Tracker{
+		Config:  cfg,
+		HomeDir: homeDir,
+		Backup:  NewBackupManager(backupDir),
+	}
+
+	err = tracker.LoadRepoManifest()
+	if err != nil {
+		t.Fatalf("LoadRepoManifest failed: %v", err)
+	}
+
+	if len(cfg.Tracked) < 2 {
+		t.Fatalf("expected at least 2 tracked items auto-imported, got %d", len(cfg.Tracked))
+	}
+}

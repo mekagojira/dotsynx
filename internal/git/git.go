@@ -42,6 +42,8 @@ func gitEnv() []string {
 	return append(os.Environ(),
 		"GIT_TERMINAL_PROMPT=0",
 		"GIT_SSH_COMMAND=ssh -o StrictHostKeyChecking=accept-new",
+		"GIT_EDITOR=true",
+		"EDITOR=true",
 	)
 }
 
@@ -115,7 +117,7 @@ func (c *Client) Init(defaultBranch string) error {
 
 // Clone clones a remote repository into RepoDir
 func (c *Client) Clone(ctx context.Context, remoteURL string, branch string) error {
-	if err := os.MkdirAll(c.RepoDir, 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(c.RepoDir), 0755); err != nil {
 		return err
 	}
 
@@ -203,6 +205,62 @@ func (c *Client) RemoteBranchExists(ctx context.Context, branch string) bool {
 		return false
 	}
 	return strings.TrimSpace(out) != ""
+}
+
+// RemoteDefaultBranch queries origin for its default branch (e.g. main or master)
+func (c *Client) RemoteDefaultBranch(ctx context.Context) string {
+	out, err := c.run(ctx, "ls-remote", "--symref", "origin", "HEAD")
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "ref: refs/heads/") {
+			parts := strings.Fields(line)
+			if len(parts) >= 2 {
+				branch := strings.TrimPrefix(parts[0], "ref: refs/heads/")
+				if branch != "" {
+					return branch
+				}
+			}
+		}
+	}
+	return ""
+}
+
+// ResetHard resets the current branch to a target ref
+func (c *Client) ResetHard(ctx context.Context, target string) error {
+	_, err := c.run(ctx, "reset", "--hard", target)
+	return err
+}
+
+// Clean removes untracked files and directories from the working tree
+func (c *Client) Clean(ctx context.Context) error {
+	_, err := c.run(ctx, "clean", "-fd")
+	return err
+}
+
+// SetUpstream sets the upstream tracking branch for branch
+func (c *Client) SetUpstream(ctx context.Context, branch string) error {
+	if branch == "" {
+		branch = "main"
+	}
+	_, err := c.run(ctx, "branch", "--set-upstream-to=origin/"+branch, branch)
+	return err
+}
+
+// CommitCount returns the number of commits in HEAD
+func (c *Client) CommitCount(ctx context.Context) (int, error) {
+	out, err := c.run(ctx, "rev-list", "--count", "HEAD")
+	if err != nil {
+		return 0, err
+	}
+	return strconv.Atoi(strings.TrimSpace(out))
+}
+
+// GetLastCommitMessage returns the commit message of HEAD
+func (c *Client) GetLastCommitMessage(ctx context.Context) (string, error) {
+	return c.run(ctx, "log", "-1", "--pretty=%B")
 }
 
 // Fetch fetches from origin
@@ -296,6 +354,10 @@ func (c *Client) Commit(ctx context.Context, message string) error {
 
 // Push pushes the current branch to origin
 func (c *Client) Push(ctx context.Context, branch string) error {
+	remote, err := c.GetRemote()
+	if err != nil || remote == "" {
+		return errors.New("remote 'origin' is not configured")
+	}
 	if branch == "" {
 		var err error
 		branch, err = c.CurrentBranch()
@@ -303,12 +365,16 @@ func (c *Client) Push(ctx context.Context, branch string) error {
 			branch = "main"
 		}
 	}
-	_, err := c.run(ctx, "push", "-u", "origin", branch)
+	_, err = c.run(ctx, "push", "-u", "origin", branch)
 	return err
 }
 
 // Pull pulls changes from origin
 func (c *Client) Pull(ctx context.Context, branch string) error {
+	remote, err := c.GetRemote()
+	if err != nil || remote == "" {
+		return errors.New("remote 'origin' is not configured")
+	}
 	if branch == "" {
 		var err error
 		branch, err = c.CurrentBranch()
@@ -316,7 +382,7 @@ func (c *Client) Pull(ctx context.Context, branch string) error {
 			branch = "main"
 		}
 	}
-	_, err := c.run(ctx, "pull", "--rebase=false", "origin", branch)
+	_, err = c.run(ctx, "pull", "--rebase=false", "--allow-unrelated-histories", "--no-edit", "origin", branch)
 	return err
 }
 

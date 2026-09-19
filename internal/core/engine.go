@@ -76,6 +76,19 @@ func (e *Engine) EnsureRepoReady(ctx context.Context) error {
 		}
 	} else if e.Config.RepoURL != "" {
 		_ = e.Git.SetRemote(e.Config.RepoURL)
+		// If local repo has no tracked dotfiles and remote has commits, adopt remote branch
+		commitCount, _ := e.Git.CommitCount(ctx)
+		lastMsg, _ := e.Git.GetLastCommitMessage(ctx)
+		isOnlyInitialCommit := commitCount <= 1 || strings.Contains(lastMsg, "Initial dotsynx repository setup")
+		if len(e.Config.Tracked) == 0 && isOnlyInitialCommit {
+			_ = e.Git.Fetch(ctx)
+			if e.Git.HasRemoteBranch(ctx, e.Config.Branch) {
+				logger.Info("Adopting remote branch origin/%s on new device", e.Config.Branch)
+				_ = e.Git.ResetHard(ctx, "origin/"+e.Config.Branch)
+				_ = e.Git.SetUpstream(ctx, e.Config.Branch)
+				_ = e.Tracker.LoadRepoManifest()
+			}
+		}
 	}
 
 	// Sanity check: ensure .git/HEAD never points to .invalid
@@ -147,6 +160,18 @@ func (e *Engine) Sync(ctx context.Context) (*SyncResult, error) {
 	if status.RemoteURL != "" {
 		_ = e.Git.Fetch(ctx)
 		status, _ = e.Git.Status(ctx)
+
+		// If on a new device with no tracked files and only initial commit, cleanly adopt remote branch
+		commitCount, _ := e.Git.CommitCount(ctx)
+		lastMsg, _ := e.Git.GetLastCommitMessage(ctx)
+		isOnlyInitialCommit := commitCount <= 1 || strings.Contains(lastMsg, "Initial dotsynx repository setup")
+		if len(e.Config.Tracked) == 0 && isOnlyInitialCommit && e.Git.HasRemoteBranch(ctx, e.Config.Branch) {
+			logger.Info("Aligning local repo with remote origin/%s on new device", e.Config.Branch)
+			_ = e.Git.ResetHard(ctx, "origin/"+e.Config.Branch)
+			_ = e.Git.SetUpstream(ctx, e.Config.Branch)
+			_ = e.Tracker.LoadRepoManifest()
+			status, _ = e.Git.Status(ctx)
+		}
 	}
 
 	// 3. Stage and commit local dotfile modifications if any
@@ -176,54 +201,75 @@ func (e *Engine) Sync(ctx context.Context) (*SyncResult, error) {
 	}
 
 	// 4. Pull if remote exists and branch exists on remote
-	remoteBranchExists := e.Git.HasRemoteBranch(ctx, e.Config.Branch) || e.Git.RemoteBranchExists(ctx, e.Config.Branch)
+	remoteBranchExists := status.RemoteURL != "" && (e.Git.HasRemoteBranch(ctx, e.Config.Branch) || e.Git.RemoteBranchExists(ctx, e.Config.Branch))
+	pullAttempted := false
+	pullSucceeded := false
 
-	if status.RemoteURL != "" && remoteBranchExists {
-		if status.Behind > 0 || hasLocalChanges {
-			if err := e.Git.Pull(ctx, e.Config.Branch); err != nil {
-				errStr := err.Error()
-				if strings.Contains(errStr, "couldn't find remote ref") || strings.Contains(errStr, "no such ref") {
-					logger.Info("Remote branch '%s' is empty or not yet created on remote. Proceeding with initial push.", e.Config.Branch)
+	if remoteBranchExists {
+		pullAttempted = true
+		if err := e.Git.Pull(ctx, e.Config.Branch); err != nil {
+			errStr := err.Error()
+			if strings.Contains(errStr, "couldn't find remote ref") || strings.Contains(errStr, "no such ref") {
+				logger.Info("Remote branch '%s' is empty or not yet created on remote. Proceeding with initial push.", e.Config.Branch)
+				pullSucceeded = true
+			} else if len(e.Config.Tracked) == 0 && e.Git.HasRemoteBranch(ctx, e.Config.Branch) {
+				// Cleanly adopt remote on new device
+				logger.Info("Adopting remote branch origin/%s after pull error on new device", e.Config.Branch)
+				if resetErr := e.Git.ResetHard(ctx, "origin/"+e.Config.Branch); resetErr == nil {
+					_ = e.Git.SetUpstream(ctx, e.Config.Branch)
+					_ = e.Tracker.LoadRepoManifest()
+					pullSucceeded = true
 				} else {
-					// Check for conflict
-					conflicts, confErr := e.Conflict.DetectConflicts(ctx)
-					if confErr == nil && len(conflicts) > 0 {
-						res.Conflicts = conflicts
-						res.Message = fmt.Sprintf("Merge conflict detected in %d file(s)", len(conflicts))
-
-						// If non-interactive auto strategy is configured, resolve immediately
-						if e.Config.ConflictStrategy == config.StrategyOurs || e.Config.ConflictStrategy == config.StrategyTheirs {
-							for _, c := range conflicts {
-								_ = e.Conflict.Resolve(ctx, c.Path, e.Config.ConflictStrategy)
-							}
-						} else {
-							return res, nil
-						}
-					} else {
-						res.Errors = append(res.Errors, fmt.Sprintf("Pull failed: %v", err))
-						logger.Warn("Git pull failed: %v", err)
-					}
+					res.Errors = append(res.Errors, fmt.Sprintf("Pull failed: %v", err))
+					logger.Warn("Git pull failed: %v", err)
 				}
 			} else {
-				res.Pulled = true
-				// Merge any dotfiles tracked by other computers
-				_ = e.Tracker.LoadRepoManifest()
+				// Check for conflict
+				conflicts, confErr := e.Conflict.DetectConflicts(ctx)
+				if confErr == nil && len(conflicts) > 0 {
+					res.Conflicts = conflicts
+					res.Message = fmt.Sprintf("Merge conflict detected in %d file(s)", len(conflicts))
+
+					// If non-interactive auto strategy is configured, resolve immediately
+					if e.Config.ConflictStrategy == config.StrategyOurs || e.Config.ConflictStrategy == config.StrategyTheirs {
+						for _, c := range conflicts {
+							_ = e.Conflict.Resolve(ctx, c.Path, e.Config.ConflictStrategy)
+						}
+						pullSucceeded = true
+					} else {
+						return res, nil
+					}
+				} else {
+					res.Errors = append(res.Errors, fmt.Sprintf("Pull failed: %v", err))
+					logger.Warn("Git pull failed: %v", err)
+				}
 			}
+		} else {
+			res.Pulled = true
+			pullSucceeded = true
 		}
-	} else if status.RemoteURL != "" && !remoteBranchExists {
+	} else if status.RemoteURL != "" {
 		logger.Info("Remote branch '%s' does not exist yet (brand new repository). Skipping pull and preparing initial push.", e.Config.Branch)
 	}
 
-	// 5. Push if ahead or if remote branch does not exist yet
-	status, _ = e.Git.Status(ctx)
-	needsPush := !remoteBranchExists || status.Ahead > 0 || hasLocalChanges
-	if e.Git.HasCommits(ctx) && needsPush {
-		if err := e.Git.Push(ctx, e.Config.Branch); err != nil {
-			res.Errors = append(res.Errors, fmt.Sprintf("Push failed: %v", err))
-			logger.Warn("Git push failed: %v", err)
-		} else {
-			res.Pushed = true
-			logger.Info("Git push to origin/%s succeeded", e.Config.Branch)
+	// Always ensure tracked list is synced with repository manifest
+	_ = e.Tracker.LoadRepoManifest()
+
+	// 5. Push if remote is configured, we have commits, and push is needed
+	if status.RemoteURL != "" && e.Git.HasCommits(ctx) {
+		// Only push if pull succeeded or was not needed (never push after a failed pull)
+		if !pullAttempted || pullSucceeded {
+			status, _ = e.Git.Status(ctx)
+			needsPush := !remoteBranchExists || status.Ahead > 0 || hasLocalChanges
+			if needsPush {
+				if err := e.Git.Push(ctx, e.Config.Branch); err != nil {
+					res.Errors = append(res.Errors, fmt.Sprintf("Push failed: %v", err))
+					logger.Warn("Git push failed: %v", err)
+				} else {
+					res.Pushed = true
+					logger.Info("Git push to origin/%s succeeded", e.Config.Branch)
+				}
+			}
 		}
 	}
 
@@ -242,6 +288,95 @@ func (e *Engine) Sync(ctx context.Context) (*SyncResult, error) {
 		res.Success = false
 		res.Message = fmt.Sprintf("Sync completed with %d error(s)", len(res.Errors))
 		logger.Error("Sync completed with errors: %s", strings.Join(res.Errors, " | "))
+	}
+
+	e.LastSync = res
+	e.SyncLogs = append([]*SyncResult{res}, e.SyncLogs...)
+	if len(e.SyncLogs) > 20 {
+		e.SyncLogs = e.SyncLogs[:20]
+	}
+
+	return res, nil
+}
+
+// ResetToRemote forces the local repository and dotfiles to match remote origin exactly
+func (e *Engine) ResetToRemote(ctx context.Context) (*SyncResult, error) {
+	res := &SyncResult{
+		Timestamp:    time.Now(),
+		AppliedFiles: []string{},
+		Errors:       []string{},
+		Conflicts:    []ConflictItem{},
+	}
+
+	if e.Config.RepoURL == "" {
+		err := fmt.Errorf("cannot reset to remote: no remote repository URL is configured")
+		res.Errors = append(res.Errors, err.Error())
+		res.Message = err.Error()
+		return res, err
+	}
+
+	branch := e.Config.Branch
+	if branch == "" {
+		branch = "main"
+	}
+
+	logger.Sync("Initiating hard reset to remote origin/%s (storage: %s)", branch, e.Config.StorageDir)
+
+	if err := e.EnsureRepoReady(ctx); err != nil {
+		res.Errors = append(res.Errors, err.Error())
+		res.Message = "Failed to initialize storage repository"
+		return res, err
+	}
+
+	_ = e.Git.SetRemote(e.Config.RepoURL)
+
+	if err := e.Git.Fetch(ctx); err != nil {
+		errMsg := fmt.Sprintf("Git fetch failed: %v", err)
+		res.Errors = append(res.Errors, errMsg)
+		res.Message = errMsg
+		logger.Error("%s", errMsg)
+		return res, err
+	}
+
+	if !e.Git.HasRemoteBranch(ctx, branch) && !e.Git.RemoteBranchExists(ctx, branch) {
+		errMsg := fmt.Sprintf("Remote branch 'origin/%s' does not exist on remote repository", branch)
+		res.Errors = append(res.Errors, errMsg)
+		res.Message = errMsg
+		logger.Error("%s", errMsg)
+		return res, fmt.Errorf("%s", errMsg)
+	}
+
+	if err := e.Git.ResetHard(ctx, "origin/"+branch); err != nil {
+		errMsg := fmt.Sprintf("Git reset --hard failed: %v", err)
+		res.Errors = append(res.Errors, errMsg)
+		res.Message = errMsg
+		logger.Error("%s", errMsg)
+		return res, err
+	}
+
+	_ = e.Git.Clean(ctx)
+	_ = e.Git.SetUpstream(ctx, branch)
+
+	// Reload tracked list entirely from remote repository manifest
+	e.Config.Tracked = []config.TrackedItem{}
+	_ = e.Tracker.LoadRepoManifest()
+
+	// Apply all symlinks to $HOME
+	applied, applyErrs := e.Tracker.ApplyAll()
+	res.AppliedFiles = applied
+	res.Pulled = true
+	for _, ae := range applyErrs {
+		res.Errors = append(res.Errors, ae.Error())
+	}
+
+	if len(res.Errors) == 0 {
+		res.Success = true
+		res.Message = fmt.Sprintf("Reset hard to origin/%s succeeded (%d items linked)", branch, len(applied))
+		logger.Sync("Reset succeeded: %s", res.Message)
+	} else {
+		res.Success = false
+		res.Message = fmt.Sprintf("Reset completed with %d error(s)", len(res.Errors))
+		logger.Error("Reset completed with errors: %s", strings.Join(res.Errors, " | "))
 	}
 
 	e.LastSync = res

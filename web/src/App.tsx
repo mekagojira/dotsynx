@@ -36,6 +36,7 @@ import {
   fetchSuggestions,
   resolveConflict,
   updateConfig,
+  resetHardToRemote,
   startDaemon,
   stopDaemon,
 } from "./api";
@@ -138,13 +139,33 @@ export const App: React.FC = () => {
     }
   };
 
-  const handleSaveConfig = async (updated: Partial<Config>) => {
+  const handleSaveConfig = async (
+    updated: Partial<Config> & { reset_to_remote?: boolean },
+  ) => {
     try {
       await updateConfig(updated);
-      showNotification("Settings saved");
+      showNotification(
+        updated.reset_to_remote
+          ? "Settings saved & local storage reset to remote!"
+          : "Settings saved successfully",
+      );
       await loadData();
     } catch (err: any) {
       showNotification(err.message || "Failed to save settings", true);
+    }
+  };
+
+  const handleResetToRemote = async () => {
+    setSyncing(true);
+    try {
+      const res = await resetHardToRemote();
+      setLastSyncResult(res);
+      showNotification(res.message, !res.success);
+      await loadData();
+    } catch (err: any) {
+      showNotification(err.message || "Failed to reset to remote", true);
+    } finally {
+      setSyncing(false);
     }
   };
 
@@ -276,6 +297,7 @@ export const App: React.FC = () => {
             <SettingsTab
               config={status.config}
               onSave={handleSaveConfig}
+              onResetToRemote={handleResetToRemote}
               onStartDaemon={async () => {
                 await startDaemon();
                 loadData();

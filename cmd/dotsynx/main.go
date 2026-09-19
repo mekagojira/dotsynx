@@ -63,6 +63,9 @@ conflict detection, background daemon/services, interactive TUI, and embedded We
 	rootCmd.AddCommand(newStopCommand())
 	rootCmd.AddCommand(newRestartCommand())
 	rootCmd.AddCommand(newSyncCommand())
+	rootCmd.AddCommand(newResetRemoteCommand())
+	rootCmd.AddCommand(newCloneCommand())
+	rootCmd.AddCommand(newConfigCommand())
 	rootCmd.AddCommand(newStatusCommand())
 	rootCmd.AddCommand(newAddCommand())
 	rootCmd.AddCommand(newRemoveCommand())
@@ -281,12 +284,39 @@ func newStopCommand() *cobra.Command {
 
 // dotsynx sync
 func newSyncCommand() *cobra.Command {
-	return &cobra.Command{
+	var resetHard bool
+
+	cmd := &cobra.Command{
 		Use:   "sync",
 		Short: "Run an immediate dotfile synchronization",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := config.Load(cfgPath)
 			if err != nil {
+				return err
+			}
+
+			if resetHard {
+				fmt.Println("🔄 Performing hard reset to remote repository...")
+				if running, _ := daemon.CheckRunning(); running {
+					res, err := daemon.RequestResetViaHTTP(cfg.WebPort)
+					if err != nil {
+						fmt.Printf("Daemon reset request failed (%v); falling back to direct reset...\n", err)
+					} else {
+						printSyncResult(res)
+						return nil
+					}
+				}
+
+				eng, err := core.NewEngine(cfg)
+				if err != nil {
+					return err
+				}
+
+				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+				defer cancel()
+
+				res, err := eng.ResetToRemote(ctx)
+				printSyncResult(res)
 				return err
 			}
 
@@ -313,6 +343,50 @@ func newSyncCommand() *cobra.Command {
 			defer cancel()
 
 			res, err := eng.Sync(ctx)
+			printSyncResult(res)
+			return err
+		},
+	}
+
+	cmd.Flags().BoolVarP(&resetHard, "reset-hard", "r", false, "Discard local divergence and force reset to remote origin/<branch>")
+	cmd.Flags().BoolVarP(&resetHard, "force", "f", false, "Alias for --reset-hard")
+	return cmd
+}
+
+// dotsynx reset-remote
+func newResetRemoteCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "reset-remote",
+		Short: "Force hard reset of local dotfiles repository to remote origin/<branch>",
+		Long:  "Fetches origin, hard resets the local repo to origin/<branch>, cleans untracked items, reloads the manifest, and updates $HOME symlinks.",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.Load(cfgPath)
+			if err != nil {
+				return err
+			}
+
+			if cfg.RepoURL == "" {
+				return fmt.Errorf("no remote repository URL is configured. Run 'dotsynx config --repo <url>' first")
+			}
+
+			fmt.Println("🔄 Resetting local dotfiles repository to remote...")
+			if running, _ := daemon.CheckRunning(); running {
+				res, err := daemon.RequestResetViaHTTP(cfg.WebPort)
+				if err == nil {
+					printSyncResult(res)
+					return nil
+				}
+			}
+
+			eng, err := core.NewEngine(cfg)
+			if err != nil {
+				return err
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer cancel()
+
+			res, err := eng.ResetToRemote(ctx)
 			printSyncResult(res)
 			return err
 		},
@@ -347,7 +421,122 @@ func printSyncResult(res *core.SyncResult) {
 	}
 }
 
-// dotsynx status
+// dotsynx clone <repo-url>
+func newCloneCommand() *cobra.Command {
+	var branch string
+	cmd := &cobra.Command{
+		Use:   "clone <repo-url>",
+		Short: "Connect to an existing dotfile repository and link dotfiles on this device",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			repoURL := strings.TrimSpace(args[0])
+			cfg, err := config.Load(cfgPath)
+			if err != nil {
+				return err
+			}
+
+			cfg.RepoURL = repoURL
+			if branch != "" {
+				cfg.Branch = branch
+			}
+			if err := cfg.Save(cfgPath); err != nil {
+				return fmt.Errorf("failed to save config: %w", err)
+			}
+
+			fmt.Printf("📦 Connecting dotsynx to remote repository: %s\n", repoURL)
+
+			eng, err := core.NewEngine(cfg)
+			if err != nil {
+				return err
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer cancel()
+
+			res, err := eng.Sync(ctx)
+			printSyncResult(res)
+			return err
+		},
+	}
+
+	cmd.Flags().StringVarP(&branch, "branch", "b", "", "Branch name (default 'main')")
+	return cmd
+}
+
+// dotsynx config
+func newConfigCommand() *cobra.Command {
+	var (
+		repoURL  string
+		branch   string
+		mode     string
+		interval string
+		strategy string
+	)
+
+	cmd := &cobra.Command{
+		Use:   "config",
+		Short: "View or update dotsynx configuration",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.Load(cfgPath)
+			if err != nil {
+				return err
+			}
+
+			changed := false
+			if cmd.Flags().Changed("repo") {
+				cfg.RepoURL = repoURL
+				changed = true
+			}
+			if cmd.Flags().Changed("branch") {
+				cfg.Branch = branch
+				changed = true
+			}
+			if cmd.Flags().Changed("mode") {
+				cfg.SyncMode = config.SyncMode(mode)
+				changed = true
+			}
+			if cmd.Flags().Changed("interval") {
+				cfg.Interval = interval
+				changed = true
+			}
+			if cmd.Flags().Changed("strategy") {
+				cfg.ConflictStrategy = config.ConflictStrategy(strategy)
+				changed = true
+			}
+
+			if changed {
+				if err := cfg.Save(cfgPath); err != nil {
+					return fmt.Errorf("failed to save config: %w", err)
+				}
+				fmt.Println("✅ Configuration updated successfully.")
+				return nil
+			}
+
+			// Display current config
+			fmt.Println("═══════════════════════════════════════════════")
+			fmt.Println("              DOTSYNX CONFIG                   ")
+			fmt.Println("═══════════════════════════════════════════════")
+			fmt.Printf("Config File:        %s\n", config.DefaultConfigPath())
+			fmt.Printf("Remote Repo URL:    %s\n", cfg.RepoURL)
+			fmt.Printf("Branch:             %s\n", cfg.Branch)
+			fmt.Printf("Sync Mode:          %s\n", cfg.SyncMode)
+			fmt.Printf("Interval:           %s\n", cfg.Interval)
+			fmt.Printf("Conflict Strategy:  %s\n", cfg.ConflictStrategy)
+			fmt.Printf("Storage Directory:  %s\n", cfg.StorageDir)
+			fmt.Printf("Backup Directory:   %s\n", cfg.BackupDir)
+			fmt.Println("═══════════════════════════════════════════════")
+			fmt.Println("Use flags to update: dotsynx config --repo <url> --branch <branch> --mode <manual|auto|boot>")
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVar(&repoURL, "repo", "", "Remote Git repository URL")
+	cmd.Flags().StringVar(&branch, "branch", "", "Git branch (default 'main')")
+	cmd.Flags().StringVar(&mode, "mode", "", "Sync mode: manual, auto, or boot")
+	cmd.Flags().StringVar(&interval, "interval", "", "Sync interval for auto mode (e.g. 15m, 1h)")
+	cmd.Flags().StringVar(&strategy, "strategy", "", "Conflict strategy: interactive, ours, or theirs")
+	return cmd
+}
 func newStatusCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:   "status",
