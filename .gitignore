@@ -1,6 +1,6 @@
 # Binaries
 bin/
-dotsynx
+/dotsynx
 *.exe
 *.dll
 *.so
